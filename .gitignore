@@ -1,0 +1,16 @@
+# Python / build artefacts
+__pycache__/
+*.py[cod]
+.build-venv/
+build/
+dist/
+ModDeck.spec
+
+# Local app data: settings, cache, logs, trash, Edge profile
+data/
+*.log
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="moddeck-token" content="__TOKEN__">
+<meta name="color-scheme" content="dark">
+<title>ModDeck</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+          <path d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7L12 2.6Z"/>
+          <path d="M3.6 7 12 11.4 20.4 7M12 11.4v10"/>
+          <path d="M7.8 4.8 16.2 9.2v4.4" opacity=".45"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-name">ModDeck</div>
+        <div class="brand-sub">mods, sorted</div>
+      </div>
+    </div>
+
+    <div class="side-head">
+      <span>Instances</span>
+      <button class="icon-btn" data-act="add-instance" title="Add a folder">+</button>
+    </div>
+    <div id="instances" class="instances"></div>
+
+    <div class="side-spacer"></div>
+    <div class="side-foot">
+      <button class="side-item" data-act="tab" data-tab="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.1-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.64 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.64h.08A1.7 1.7 0 0 0 10.1 3.1V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9v.08a1.7 1.7 0 0 0 1.55 1.02H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51.9Z"/></svg>
+        Settings
+      </button>
+      <div class="side-version">ModDeck v__VERSION__</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar" id="topbar"></header>
+    <nav class="tabs" id="tabs"></nav>
+    <section class="view" id="view"></section>
+  </main>
+</div>
+
+<div id="toasts" class="toasts"></div>
+<div id="modal-root"></div>
+<script src="/app.js"></script>
+</body>
+</html>
