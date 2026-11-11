@@ -2056,8 +2056,7 @@ def api_project(q):
                                   headers=cf_headers()) or {}
                 items = found.get("data") or []
             match = next((m for m in items
-                          if str(m.get("slug") or "").lower() == slug.lower()),
-                         items[0] if items else None)
+                          if str(m.get("slug") or "").lower() == slug.lower()), None)
             if not match:
                 raise ApiError(404, f"No CurseForge project found for '{slug}'.")
             project_id = str(match.get("id"))
