@@ -15,6 +15,20 @@ const prettyPath = (p) => String(p ?? '')
   .replace(/^([A-Za-z]:\\Users\\[^\\]+)(?=\\|$)/i, '~')
   .replace(/^\/home\/[^/]+(?=\/|$)/, '~');
 
+// Mod project pages can be opened inside ModDeck; everything else stays in the
+// browser. CurseForge slugs are resolved to numeric ids by the backend.
+const MR_MOD_LINK = /^(?:https?:\/\/)?(?:www\.)?modrinth\.com\/(?:mod|project)\/([^/?#]+)/i;
+const CF_MOD_LINK = /^(?:https?:\/\/)?(?:www\.)?curseforge\.com\/minecraft\/mc-mods\/([^/?#]+)/i;
+
+function projectFromHref(href) {
+  const raw = String(href || '');
+  const mr = raw.match(MR_MOD_LINK);
+  if (mr) return { source: 'modrinth', id: decodeURIComponent(mr[1]) };
+  const cf = raw.match(CF_MOD_LINK);
+  if (cf) return { source: 'curseforge', id: decodeURIComponent(cf[1]) };
+  return null;
+}
+
 const ICON = {
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
   warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 3.2 21 19.5H3L12 3.2Z"/><path d="M12 9v4.5M12 16.8v.2"/></svg>',
@@ -37,6 +51,11 @@ const state = {
   issuesOpen: true,
   tags: null,
   discover: { q: '', source: 'modrinth', sort: 'downloads', hits: [], total: 0, offset: 0, loading: false, loaded: false, error: null },
+  describe: {
+    q: '', source: 'all', hits: [], total: 0, intents: [], tokens: [],
+    sources: null, curseforgeEnabled: false, loading: false, loaded: false, error: null,
+  },
+  projectStack: [],
   updates: null,
   updatesLoading: false,
   updatesError: null,
@@ -346,11 +365,13 @@ function render() {
   renderSidebar();
   renderHeader();
   renderTabs();
-  const settingsBtn = $('.side-item[data-tab="settings"]');
-  if (settingsBtn) settingsBtn.classList.toggle('active', !state.detail && state.tab === 'settings');
+  $$('.side-item[data-tab]').forEach((btn) => {
+    btn.classList.toggle('active', state.tab === btn.dataset.tab);
+  });
   if (state.detail) renderProject();
   else if (state.tab === 'mods') renderMods();
   else if (state.tab === 'discover') renderDiscover();
+  else if (state.tab === 'describe') renderDescribe();
   else if (state.tab === 'updates') renderUpdates();
   else renderSettings();
 }
@@ -712,6 +733,7 @@ function discoverCard(hit) {
       </div>
     </div>
     <div class="card-desc">${esc(hit.description || '')}</div>
+    ${(hit.why || []).length ? `<div class="why">${hit.why.map((w) => `<span class="chip why-chip">${esc(w)}</span>`).join('')}</div>` : ''}
     <div class="card-foot">
       <div class="card-stats">
         <span>${ICON.download.replace('<svg', '<svg width="12" height="12" style="vertical-align:-1px"')} ${fmtNum(hit.downloads)}</span>
@@ -721,6 +743,166 @@ function discoverCard(hit) {
         data-source="${esc(hit.source)}" data-id="${esc(hit.id)}" data-title="${esc(hit.title)}">Install</button>
     </div>
   </div>`;
+}
+
+/* --------------------------------------------------------------- describe */
+
+const DESCRIBE_EXAMPLES = [
+  'make my game run smoother on a potato pc and show my fps',
+  'show my armor durability on screen',
+  'automatically sort items into chests',
+  'beautiful shaders for a low end laptop',
+  'a minimap with waypoints so I stop getting lost',
+  'add dungeons and bosses to explore',
+];
+
+function renderDescribe() {
+  const view = $('#view');
+  const d = state.describe;
+  const target = state.inst
+    ? esc([state.inst.loader, state.inst.mcVersion].filter(Boolean).join(' '))
+    : 'your setup';
+  const cfLine = state.hasCfKey ? ' and CurseForge' : '';
+  view.innerHTML = `<div class="view-inner describe">
+    <div class="describe-hero">
+      <div class="describe-eyebrow">Describe search</div>
+      <h1>What should the mod do?</h1>
+      <p>Skip the name. Write what you want in plain words and ModDeck will turn it into
+        intents, find candidates on Modrinth${cfLine}, and rank what actually fits
+        <b>${target}</b>.</p>
+    </div>
+    <div class="describe-box">
+      <textarea id="desc-input" rows="3" placeholder="e.g. something that makes my game run smoother on a potato pc, and shows my fps"></textarea>
+      <div class="describe-actions">
+        <div class="seg" id="desc-source">
+          <button class="${d.source === 'all' ? 'active' : ''}" data-act="desc-source" data-source="all">All sources</button>
+          <button class="${d.source === 'modrinth' ? 'active' : ''}" data-act="desc-source" data-source="modrinth">Modrinth</button>
+          <button class="${d.source === 'curseforge' ? 'active' : ''}" data-act="desc-source" data-source="curseforge">CurseForge</button>
+        </div>
+        <button class="btn primary" data-act="desc-search">
+          ${ICON.search.replace('<svg', '<svg width="14" height="14" style="vertical-align:-2px"')} Find mods
+        </button>
+      </div>
+    </div>
+    <div class="describe-examples">
+      <span class="muted">Try</span>
+      ${DESCRIBE_EXAMPLES.map((text) => `<button class="example" data-act="desc-example" data-text="${esc(text)}">${esc(text)}</button>`).join('')}
+    </div>
+    <div id="desc-note"></div>
+    <div id="desc-results"></div>
+  </div>`;
+
+  $('#desc-input').value = d.q;
+  $('#desc-input').addEventListener('input', (e) => { d.q = e.target.value; });
+  $('#desc-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      searchDescribe();
+    }
+  });
+  paintDescribeResults();
+  paintDescribeNote();
+}
+
+function paintDescribeNote() {
+  const host = $('#desc-note');
+  if (!host) return;
+  const d = state.describe;
+  if (d.source === 'curseforge' && !state.hasCfKey) {
+    host.innerHTML = `<div class="issues warn-only" data-open="true" style="margin:0 0 14px">
+      <div class="issues-head"><span class="i-ico">${ICON.warn}</span>
+        <b>CurseForge needs an API key</b>
+        <span class="sub">- free from console.curseforge.com</span>
+        <button class="btn sm primary" style="margin-left:auto" data-act="tab" data-tab="settings">Add key</button>
+      </div></div>`;
+    return;
+  }
+  if (d.source === 'all' && !state.hasCfKey) {
+    host.innerHTML = `<div class="desc-skip">CurseForge is skipped until an API key is added.
+      <button class="link-btn" data-act="tab" data-tab="settings">Add one in Settings</button>.
+      Modrinth works without a key.</div>`;
+    return;
+  }
+  host.innerHTML = '';
+}
+
+function paintDescribeResults() {
+  const host = $('#desc-results');
+  if (!host) return;
+  const d = state.describe;
+  if (d.loading) {
+    host.innerHTML = `<div class="grid">${Array.from({ length: 6 }).map(() => '<div class="skeleton" style="height:168px"></div>').join('')}</div>`;
+    return;
+  }
+  if (d.error) {
+    host.innerHTML = `<div class="empty">${ICON.warn}<h3>Describe search failed</h3><p>${esc(d.error)}</p></div>`;
+    return;
+  }
+  if (!d.loaded) {
+    host.innerHTML = `<div class="empty desc-idle">${ICON.search}<h3>Results land here</h3>
+      <p>Say what the mod should do, not what it is called. Ctrl+Enter also searches.</p></div>`;
+    return;
+  }
+  if (!d.hits.length) {
+    host.innerHTML = `<div class="empty">${ICON.search}<h3>Nothing matched</h3>
+      <p>Try a shorter description, or mention the job (fps, storage, minimap, shaders, dungeon) instead of the name.</p></div>`;
+    return;
+  }
+
+  const intentChips = (d.intents || []).map((i) => {
+    const matched = (i.matched || []).slice(0, 3).join(', ');
+    return `<span class="chip desc-intent" title="${esc(matched)}">${esc(i.label)}</span>`;
+  }).join('');
+  const tokenChips = (d.tokens || []).slice(0, 6)
+    .map((t) => `<span class="chip muted">${esc(t)}</span>`).join('');
+  const counts = d.sources
+    ? `Modrinth ${d.sources.modrinth}${d.sources.curseforge ? ` · CurseForge ${d.sources.curseforge}` : ''}`
+    : '';
+
+  host.innerHTML = `
+    <div class="desc-interpret">
+      <div class="row-gap"><span class="desc-read">Read as</span>
+        ${intentChips || '<span class="muted">keywords only</span>'}
+        ${tokenChips}</div>
+      <div class="muted desc-count">${d.total} ranked result${d.total === 1 ? '' : 's'}${counts ? ` · ${counts}` : ''}</div>
+    </div>
+    <div class="grid">${d.hits.map(discoverCard).join('')}</div>`;
+}
+
+async function searchDescribe() {
+  const d = state.describe;
+  if (d.loading) return;
+  const text = d.q.trim();
+  if (!text) { toast('Describe what you need first', 'warn'); return; }
+
+  setHash('describe/' + encodeURIComponent(text));
+  d.loading = true;
+  d.error = null;
+  d.loaded = false;
+  paintDescribeResults();
+
+  const params = new URLSearchParams({ q: text, source: d.source });
+  if (state.inst) {
+    params.set('loader', state.inst.loader || '');
+    params.set('mc', state.inst.mcVersion || '');
+  }
+  try {
+    const data = await api('describe?' + params.toString());
+    d.hits = data.hits || [];
+    d.total = data.total || d.hits.length;
+    d.intents = data.intents || [];
+    d.tokens = data.tokens || [];
+    d.sources = data.sources || null;
+    d.curseforgeEnabled = !!data.curseforgeEnabled;
+    d.loaded = true;
+  } catch (e) {
+    d.error = e.message;
+    d.loaded = true;
+  } finally {
+    d.loading = false;
+    paintDescribeResults();
+    paintDescribeNote();
+  }
 }
 
 /* ------------------------------------------------------------ version picker */
@@ -797,12 +979,35 @@ function handleHash() {
     if (source && id) openProject(source, id);
     return;
   }
-  if (['mods', 'discover', 'updates', 'settings'].includes(hash)) {
+  if (hash.startsWith('describe/')) {
+    let text = '';
+    try { text = decodeURIComponent(hash.slice('describe/'.length)); } catch { /* ignore */ }
     state.detail = null;
+    state.projectStack = [];
+    state.tab = 'describe';
+    state.describe.q = text;
+    render();
+    if (text.trim() && !state.describe.loaded) searchDescribe();
+    return;
+  }
+  if (['mods', 'discover', 'describe', 'updates', 'settings'].includes(hash)) {
+    state.detail = null;
+    state.projectStack = [];
     state.tab = hash;
     render();
     if (hash === 'updates' && !state.updates && !state.updatesLoading) checkUpdates();
   }
+}
+
+function pushProject(source, id, title = '') {
+  if (state.detail && (state.detail.source !== source || state.detail.id !== id)) {
+    state.projectStack.push({
+      source: state.detail.source,
+      id: state.detail.id,
+      title: state.detail.title || '',
+    });
+  }
+  return openProject(source, id, title);
 }
 
 async function openProject(source, id, title = '', author = '') {
@@ -835,8 +1040,13 @@ async function openProject(source, id, title = '', author = '') {
 }
 
 function closeProject() {
+  const previous = state.projectStack.pop();
+  if (previous) return openProject(previous.source, previous.id, previous.title);
   state.detail = null;
-  setHash(state.tab);
+  const fallback = state.tab === 'describe' && state.describe.q.trim()
+    ? 'describe/' + encodeURIComponent(state.describe.q.trim())
+    : state.tab;
+  setHash(fallback);
   render();
 }
 
@@ -844,7 +1054,11 @@ function renderProject() {
   const view = $('#view');
   const d = state.detail;
   if (!d) return;
-  const back = `<div class="proj-back"><button class="btn ghost sm" data-act="close-project">← Back to ${esc(state.tab)}</button></div>`;
+  const previous = state.projectStack[state.projectStack.length - 1];
+  const backLabel = previous
+    ? `Back to ${(previous.title || 'previous mod').slice(0, 46)}`
+    : `Back to ${state.tab}`;
+  const back = `<div class="proj-back"><button class="btn ghost sm" data-act="close-project">← ${esc(backLabel)}</button></div>`;
 
   if (d.loading && !d.data) {
     view.innerHTML = `<div class="view-inner">${back}
@@ -1271,13 +1485,17 @@ async function selectInstance(id) {
   if (!inst) return;
   state.inst = inst;
   state.detail = null;
+  state.projectStack = [];
   state.scan = null;
   state.q = '';
   state.filter = 'all';
   state.updates = null;
+  state.discover.loaded = false;
+  state.describe.loaded = false;
   state.tab = state.tab === 'settings' ? 'settings' : state.tab;
   render();
   await refreshScan();
+  if (state.tab === 'describe' && state.describe.q.trim()) await searchDescribe();
   api('settings', { method: 'POST', body: { lastInstance: id } }).catch(() => {});
   localStorage.setItem('moddeck.inst', id);
 }
@@ -1343,7 +1561,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeModal();
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
   if (e.key === '/' && !typing) {
-    const box = $('#mod-search') || $('#disc-search');
+    const box = $('#mod-search') || $('#disc-search') || $('#desc-input');
     if (box) { e.preventDefault(); box.focus(); }
   }
   if (!typing && (e.key === 'Enter' || e.key === ' ')) {
@@ -1352,6 +1570,17 @@ document.addEventListener('keydown', (e) => {
       : null;
     if (card) { e.preventDefault(); card.click(); }
   }
+});
+
+document.addEventListener('click', (e) => {
+  if (e.defaultPrevented || e.button !== 0) return;
+  if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+  const link = e.target.closest && e.target.closest('a[href]');
+  if (!link) return;
+  const target = projectFromHref(link.getAttribute('href'));
+  if (!target) return;
+  e.preventDefault();
+  pushProject(target.source, target.id, (link.textContent || '').trim());
 });
 
 document.addEventListener('click', async (e) => {
@@ -1364,7 +1593,7 @@ document.addEventListener('click', async (e) => {
   switch (act) {
     case 'select-inst': return selectInstance(el.dataset.id);
     case 'open-project':
-      return openProject(el.dataset.source, el.dataset.id, el.dataset.title);
+      return pushProject(el.dataset.source, el.dataset.id, el.dataset.title);
     case 'close-project':
       return closeProject();
     case 'proj-tab': {
@@ -1388,12 +1617,32 @@ document.addEventListener('click', async (e) => {
     case 'go-tab': {
       const tab = el.dataset.tab;
       state.detail = null;
+      state.projectStack = [];
       state.tab = tab;
       try { history.replaceState(null, '', '#' + tab); } catch { /* ignore */ }
       if (tab === 'discover') { render(); }
       else if (tab === 'updates') { render(); if (!state.updates && !state.updatesLoading) checkUpdates(); }
       else render();
       return;
+    }
+    case 'desc-search': return searchDescribe();
+    case 'desc-source': {
+      const d = state.describe;
+      if (d.loading) return;
+      d.source = el.dataset.source;
+      $$('#desc-source button').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.source === d.source);
+      });
+      paintDescribeNote();
+      if (d.loaded) searchDescribe();
+      return;
+    }
+    case 'desc-example': {
+      const d = state.describe;
+      d.q = el.dataset.text || '';
+      const input = $('#desc-input');
+      if (input) input.value = d.q;
+      return searchDescribe();
     }
     case 'rescan': return refreshScan();
     case 'open-folder': {
@@ -1737,9 +1986,16 @@ window.addEventListener('hashchange', handleHash);
       || state.instances[0];
     const hash = location.hash.replace('#', '');
     const projectHash = hash.match(/^project\/(modrinth|curseforge)\/(.+)$/);
-    if (['mods', 'discover', 'updates', 'settings'].includes(hash)) state.tab = hash;
+    const describeHash = hash.match(/^describe\/(.+)$/);
+    if (['mods', 'discover', 'describe', 'updates', 'settings'].includes(hash)) state.tab = hash;
     await selectInstance(wanted.id);
     if (projectHash) await openProject(projectHash[1], decodeURIComponent(projectHash[2]));
+    else if (describeHash) {
+      state.tab = 'describe';
+      try { state.describe.q = decodeURIComponent(describeHash[1]); } catch { /* ignore */ }
+      render();
+      await searchDescribe();
+    }
     else if (state.tab === 'updates') checkUpdates();
   } catch (e) {
     $('#view').innerHTML = `<div class="empty">${ICON.warn}<h3>ModDeck could not start</h3><p>${esc(e.message)}</p></div>`;

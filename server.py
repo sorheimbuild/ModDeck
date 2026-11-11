@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -32,7 +33,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "ModDeck"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 WEB_DIR = RESOURCE_DIR / "web"
@@ -1329,6 +1330,678 @@ def api_search(q):
     return {"hits": hits, "total": data.get("total_hits") or len(hits), "source": source}
 
 
+# ------------------------------------------------------------- describe search
+#
+# Modrinth's search is keyword-strict: a whole sentence ("make my game run
+# smoother on a potato pc") returns zero hits. So instead of forwarding prose,
+# describe-search extracts intents, fetches candidates with a few cheap keyword
+# and category queries, then ranks them locally. CurseForge uses the same plan
+# when an API key is configured; without a key it is skipped silently.
+
+DESCRIBE_STOPWORDS = {
+    "a", "an", "the", "and", "or", "but", "if", "then", "so", "to", "of", "for",
+    "with", "without", "in", "on", "at", "by", "from", "up", "into", "over",
+    "that", "this", "these", "those", "there", "here", "it", "its", "is", "are",
+    "was", "were", "be", "been", "being", "am", "i", "me", "my", "mine", "we",
+    "our", "you", "your", "he", "she", "they", "them", "their", "his", "her",
+    "want", "wanna", "need", "needs", "looking", "look", "find", "search",
+    "something", "some", "any", "mod", "mods", "modded", "minecraft", "mc",
+    "please", "would", "like", "get", "got", "have", "has", "make", "makes",
+    "making", "let", "lets", "allow", "allows", "able", "can", "could",
+    "should", "will", "just", "really", "very", "more", "most", "less",
+    "also", "too", "when", "while", "during", "after", "before", "about",
+    "one", "ones", "thing", "things", "stuff", "kind", "type",
+    "better", "best", "good", "great", "nice", "cool", "new", "add", "adds",
+    "adding", "use", "using", "used", "work", "works", "working", "help",
+    "helps", "helping", "how", "what", "which", "who", "where", "why", "does",
+    "do", "did", "not", "no", "yes", "all", "every", "each", "other", "such",
+    "than", "as", "only", "even", "still", "way", "much", "many", "lot",
+    "lots", "bit", "little", "game", "gameplay", "playing", "play", "player",
+    "players", "world", "survival", "smp", "feeling", "imo", "pls", "plz",
+    "run", "runs", "running", "show", "shows", "show me", "give", "gives",
+    "put", "puts", "dont", "doesnt", "cant", "wont", "im", "ive", "id",
+}
+
+# key/label, phrases that signal the intent, Modrinth categories to browse, and
+# short keyword queries that actually return hits in the Modrinth search index.
+DESCRIBE_INTENTS = [
+    {
+        "key": "performance",
+        "label": "performance",
+        "terms": ("performance", "fps", "lag", "laggy", "smooth", "smoother", "smoothest",
+                  "stutter", "stutters", "stuttering", "optimize", "optimized", "optimization",
+                  "potato", "low end", "low-end", "low spec", "weak pc", "old pc", "old laptop",
+                  "slow pc", "slow computer", "boost", "faster", "speed up", "memory", "ram"),
+        "categories": ("optimization",),
+        "keywords": ("performance", "fps", "optimization"),
+    },
+    {
+        "key": "shaders",
+        "label": "shaders",
+        "terms": ("shader", "shaders", "shader pack", "shaderpack", "ray tracing", "rtx",
+                  "lighting", "graphics", "beautiful", "pretty", "visuals"),
+        "categories": ("optimization", "decoration"),
+        "keywords": ("shaders", "iris"),
+    },
+    {
+        "key": "storage",
+        "label": "storage",
+        "terms": ("storage", "chest", "chests", "sort", "sorting", "sorted", "organize",
+                  "organized", "organizing", "drawer", "drawers", "backpack", "backpacks",
+                  "barrel", "barrels", "item management", "store items", "store my items",
+                  "too many items"),
+        "categories": ("storage", "management"),
+        "keywords": ("storage", "sorting", "chests"),
+    },
+    {
+        "key": "hud",
+        "label": "hud",
+        "terms": ("hud", "overlay", "on screen", "on-screen", "display", "show my",
+                  "shows my", "armor durability", "durability", "coordinates", "coords",
+                  "armor", "armour", "health", "hunger", "status effects", "compass"),
+        "categories": ("utility", "gui"),
+        "keywords": ("hud", "overlay", "durability"),
+    },
+    {
+        "key": "minimap",
+        "label": "minimap",
+        "terms": ("minimap", "mini-map", "waypoint", "waypoints", "map", "maps", "navigation",
+                  "navigate", "location", "where am i"),
+        "categories": ("utility", "transportation"),
+        "keywords": ("minimap", "waypoints", "map"),
+    },
+    {
+        "key": "inventory",
+        "label": "inventory",
+        "terms": ("inventory", "item viewer", "recipe book", "recipes", "recipe", "crafting",
+                  "craft", "jei", "rei", "emi", "inventory tweaks", "sort my inventory"),
+        "categories": ("utility", "management"),
+        "keywords": ("inventory", "recipes", "crafting"),
+    },
+    {
+        "key": "building",
+        "label": "building",
+        "terms": ("building", "build", "builder", "builds", "decoration", "decorative", "decor",
+                  "furniture", "blocks", "new blocks", "walls", "roofs", "architecture", "chisel"),
+        "categories": ("decoration", "blocks"),
+        "keywords": ("building", "decoration", "blocks"),
+    },
+    {
+        "key": "adventure",
+        "label": "adventure",
+        "terms": ("adventure", "dungeon", "dungeons", "structure", "structures", "exploring",
+                  "exploration", "explore", "quest", "quests", "boss", "bosses", "new dimension",
+                  "dimensions"),
+        "categories": ("adventure", "dungeons", "worldgen"),
+        "keywords": ("adventure", "dungeons", "structures"),
+    },
+    {
+        "key": "magic",
+        "label": "magic",
+        "terms": ("magic", "magical", "spell", "spells", "wizard", "mana", "enchanting",
+                  "ritual", "rituals", "wands"),
+        "categories": ("magic",),
+        "keywords": ("magic", "spells", "wizard"),
+    },
+    {
+        "key": "technology",
+        "label": "technology",
+        "terms": ("tech", "technology", "machine", "machines", "energy", "power",
+                  "electricity", "factory", "industrial", "pipes", "cables", "reactors",
+                  "generators"),
+        "categories": ("technology", "technical"),
+        "keywords": ("technology", "machines", "automation"),
+    },
+    {
+        "key": "farming",
+        "label": "food & farming",
+        "terms": ("farm", "farms", "farming", "crop", "crops", "agriculture", "harvest", "food",
+                  "cooking", "cook", "animals", "bees"),
+        "categories": ("food",),
+        "keywords": ("farming", "crops", "food"),
+    },
+    {
+        "key": "worldgen",
+        "label": "world generation",
+        "terms": ("worldgen", "world generation", "biomes", "biome", "terrain", "landscape",
+                  "caves", "new world", "generation", "generate world"),
+        "categories": ("worldgen",),
+        "keywords": ("worldgen", "biomes", "terrain"),
+    },
+    {
+        "key": "mobs",
+        "label": "mobs",
+        "terms": ("mob", "mobs", "creature", "creatures", "animal", "animals", "monster",
+                  "monsters", "hostile", "spawn", "spawning", "entity", "entities", "pets"),
+        "categories": ("mobs", "entities"),
+        "keywords": ("mobs", "creatures", "animals"),
+    },
+    {
+        "key": "combat",
+        "label": "combat",
+        "terms": ("combat", "fight", "fighting", "pvp", "weapon", "weapons", "sword", "swords",
+                  "shield", "shields", "damage", "attack", "attacks", "parry", "dodge"),
+        "categories": ("combat", "equipment"),
+        "keywords": ("combat", "pvp", "weapons"),
+    },
+    {
+        "key": "equipment",
+        "label": "armor & tools",
+        "terms": ("armor", "armour", "tool", "tools", "equipment", "gear", "helmet",
+                  "chestplate", "leggings", "boots", "trident", "bow", "bows"),
+        "categories": ("equipment",),
+        "keywords": ("armor", "tools", "equipment"),
+    },
+    {
+        "key": "visual",
+        "label": "visuals & cosmetics",
+        "terms": ("visual", "visuals", "looks", "appearance", "cosmetic", "cosmetics", "skin",
+                  "skins", "cape", "capes", "particle", "particles", "animation", "animations",
+                  "animated", "texture", "textures", "glowing", "glow"),
+        "categories": ("decoration",),
+        "keywords": ("cosmetics", "animations", "visual"),
+    },
+    {
+        "key": "library",
+        "label": "library",
+        "terms": ("library", "api", "framework", "dependency", "dependencies", "required", "core"),
+        "categories": ("library",),
+        "keywords": ("library", "api", "framework"),
+    },
+    {
+        "key": "recording",
+        "label": "recording",
+        "terms": ("record", "recording", "replay", "replays", "screenshot", "screenshots",
+                  "stream", "streaming", "obs", "video", "cinematic"),
+        "categories": ("utility", "screenshot"),
+        "keywords": ("replay", "recording", "screenshot"),
+    },
+    {
+        "key": "chat",
+        "label": "chat & social",
+        "terms": ("chat", "voice", "talking", "talk", "communication", "message", "messages",
+                  "emoji", "emotes", "ping", "pings"),
+        "categories": ("social",),
+        "keywords": ("chat", "voice", "communication"),
+    },
+    {
+        "key": "redstone",
+        "label": "redstone",
+        "terms": ("redstone", "contraption", "contraptions", "circuit", "circuits", "logic",
+                  "wiring", "piston", "pistons"),
+        "categories": ("technology", "technical"),
+        "keywords": ("redstone", "circuits", "logic"),
+    },
+    {
+        "key": "transport",
+        "label": "transport",
+        "terms": ("transport", "transportation", "travel", "fast travel", "vehicle", "vehicles",
+                  "car", "cars", "boat", "boats", "minecart", "minecarts", "teleport",
+                  "teleports", "waystone", "waystones", "portal", "portals", "elevator"),
+        "categories": ("transportation", "utility"),
+        "keywords": ("transport", "teleport", "waystones"),
+    },
+    {
+        "key": "difficulty",
+        "label": "difficulty",
+        "terms": ("difficulty", "hard", "harder", "hardest", "challenge", "challenging",
+                  "hardcore", "more difficult", "too easy"),
+        "categories": ("challenging", "hardcore-mode"),
+        "keywords": ("difficulty", "hardcore", "challenge"),
+    },
+    {
+        "key": "fixes",
+        "label": "fixes & compatibility",
+        "terms": ("fix", "fixes", "fixed", "bug", "bugs", "bugfix", "crash", "crashes",
+                  "crashing", "patch", "patches", "compatibility", "compatible"),
+        "categories": ("utility", "tweaks"),
+        "keywords": ("fix", "bugfix", "compatibility"),
+    },
+    {
+        "key": "interface",
+        "label": "interface",
+        "terms": ("menu", "menus", "ui", "interface", "gui", "screen", "screens", "main menu",
+                  "pause menu", "button", "buttons", "config"),
+        "categories": ("gui", "utility"),
+        "keywords": ("menu", "interface", "gui"),
+    },
+    {
+        "key": "automation",
+        "label": "automation",
+        "terms": ("automate", "automation", "automatic", "automatically", "afk", "auto", "idle"),
+        "categories": ("technology", "technical"),
+        "keywords": ("automation", "automatic", "afk"),
+    },
+    {
+        "key": "sound",
+        "label": "sound",
+        "terms": ("sound", "sounds", "music", "audio", "soundtrack", "ambient", "noise"),
+        "categories": ("audio",),
+        "keywords": ("sound", "music", "audio"),
+    },
+    {
+        "key": "economy",
+        "label": "economy",
+        "terms": ("economy", "money", "currency", "shop", "shops", "trading", "trade",
+                  "villager", "villagers", "market"),
+        "categories": ("economy", "management"),
+        "keywords": ("economy", "shops", "currency"),
+    },
+    {
+        "key": "multiplayer",
+        "label": "multiplayer",
+        "terms": ("multiplayer", "server", "servers", "co-op", "coop", "friends", "together",
+                  "server side", "server-side"),
+        "categories": ("multiplayer", "social"),
+        "keywords": ("multiplayer", "server", "social"),
+    },
+]
+
+_TERM_RE = re.compile(r"[a-z0-9][a-z0-9'\-]*")
+
+
+def _norm_words(text) -> list[str]:
+    return _TERM_RE.findall(str(text or "").lower())
+
+
+def _term_hit(term: str, tokens: set[str], token_list: list[str], padded: str) -> bool:
+    term = term.lower()
+    if " " in term or "-" in term:
+        return (" " + term + " ") in padded
+    if term in tokens:
+        return True
+    if len(term) >= 4:
+        for token in token_list:
+            if token.startswith(term) and len(token) - len(term) <= 3:
+                return True
+            if term.startswith(token) and len(token) >= 4 and len(term) - len(token) <= 2:
+                return True
+    return False
+
+
+def analyze_description(text: str) -> dict:
+    """Turn a sentence into intents plus a handful of useful keywords."""
+    text = (text or "").strip()[:600]
+    token_list = _norm_words(text)
+    token_set = set(token_list)
+    padded = " " + " ".join(token_list) + " "
+
+    intents = []
+    for spec in DESCRIBE_INTENTS:
+        matched = []
+        for term in spec["terms"]:
+            if _term_hit(term, token_set, token_list, padded) and term not in matched:
+                matched.append(term)
+        if not matched:
+            continue
+        weight = sum(min(3, len(t.split())) + 1 for t in matched)
+        intents.append({
+            "key": spec["key"],
+            "label": spec["label"],
+            "matched": matched[:5],
+            "categories": spec["categories"],
+            "keywords": spec["keywords"],
+            "weight": weight,
+        })
+    intents.sort(key=lambda i: (-i["weight"], i["key"]))
+
+    keywords = []
+    seen = set()
+    for token in token_list:
+        if token in DESCRIBE_STOPWORDS or (len(token) < 3 and not token.isdigit()):
+            continue
+        if token not in seen:
+            seen.add(token)
+            keywords.append(token)
+    return {"text": text, "tokens": keywords, "intents": intents}
+
+
+def _mr_describe_hits(plan: dict, loader: str, mc_version: str) -> list[dict]:
+    base_facets = [["project_type:mod"]]
+    if loader in ("fabric", "forge", "neoforge", "quilt"):
+        base_facets.append([f"categories:{loader}"])
+    if mc_version:
+        base_facets.append([f"versions:{mc_version}"])
+
+    intents = plan["intents"]
+    queries = []
+
+    # One category browse for the strongest intent: cheap and reliable.
+    if intents:
+        category = (intents[0]["categories"] or [None])[0]
+        if category:
+            queries.append({"query": "", "categories": [category],
+                            "index": "downloads", "limit": 20})
+
+    # Fixed keyword queries for the two strongest intents.
+    fixed_words = set()
+    for intent in intents[:2]:
+        keywords = [w for w in intent["keywords"] if w not in fixed_words]
+        if keywords:
+            fixed_words.update(keywords)
+            queries.append({"query": " ".join(keywords[:2]), "categories": [],
+                            "index": "relevance", "limit": 15})
+
+    # Specific words the user actually used ("furniture", "durability", ...).
+    if intents:
+        terms = []
+        for term in intents[0]["matched"]:
+            term = term.strip()
+            if len(term) < 4 or " " in term or "-" in term:
+                continue
+            if term in DESCRIBE_STOPWORDS or term in terms:
+                continue
+            terms.append(term)
+        # Drop prefixes ("build" when "building" is present), then prefer the
+        # most specific words.
+        terms = [t for t in terms if not any(o != t and o.startswith(t) for o in terms)]
+        terms.sort(key=len, reverse=True)
+        for term in terms[:2]:
+            queries.append({"query": term, "categories": [],
+                            "index": "relevance", "limit": 12})
+
+    token_query = " ".join(plan["tokens"][:6])
+    if token_query:
+        queries.append({"query": token_query, "categories": [],
+                        "index": "relevance", "limit": 20})
+
+    urls = []
+    seen_queries = set()
+    for spec in queries:
+        signature = (spec["query"], tuple(spec["categories"]))
+        if signature in seen_queries or not (spec["query"] or spec["categories"]):
+            continue
+        seen_queries.add(signature)
+        facets = list(base_facets) + [[f"categories:{c}"] for c in spec["categories"]]
+        params = {"limit": spec["limit"], "index": spec["index"], "facets": json.dumps(facets)}
+        if spec["query"]:
+            params["query"] = spec["query"]
+        urls.append(f"{MODRINTH}/search?" + urllib.parse.urlencode(params))
+
+    def fetch(url: str) -> dict:
+        cache_key = "mrdesc:" + url
+        data = cget(cache_key)
+        if data is not None:
+            return data
+        try:
+            data = http_json(url) or {}
+        except ApiError:
+            return {}
+        cset(cache_key, data, 300)
+        return data
+
+    if not urls:
+        return []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        responses = list(pool.map(fetch, urls))
+
+    hits = []
+    seen_ids = set()
+    for data in responses:
+        for h in data.get("hits") or []:
+            project_id = h.get("project_id")
+            if not project_id or project_id in seen_ids:
+                continue
+            seen_ids.add(project_id)
+            hits.append({
+                "source": "modrinth",
+                "id": project_id,
+                "slug": h.get("slug"),
+                "title": h.get("title"),
+                "description": h.get("description"),
+                "icon": h.get("icon_url") or "",
+                "downloads": h.get("downloads") or 0,
+                "follows": h.get("follows") or 0,
+                "author": h.get("author"),
+                "categories": h.get("categories") or [],
+                "updated": h.get("date_modified"),
+            })
+    return hits
+
+
+def _cf_categories() -> list[dict]:
+    cached = cget("cfcats")
+    if cached is not None:
+        return cached
+    params = {"gameId": CF_GAME_ID, "classId": CF_CLASS_MODS}
+    data = http_json(f"{CURSEFORGE}/categories?" + urllib.parse.urlencode(params),
+                     headers=cf_headers()) or {}
+    cats = [{
+        "id": c.get("id"),
+        "name": c.get("name") or "",
+        "slug": c.get("slug") or "",
+    } for c in data.get("data") or []]
+    cset("cfcats", cats, 86400)
+    return cats
+
+
+def _cf_category_match(intent: dict, cats: list[dict]):
+    """Fuzzy-match an intent to a CurseForge category name.
+
+    Naming differs between the platforms ("optimization" vs "Performance"), and
+    categories change over time, so this only accepts a category when most of
+    its words are covered by the intent. Otherwise the keyword query is used.
+    """
+    wanted = set()
+    for value in [intent["label"]] + list(intent["categories"]):
+        wanted.update(_norm_words(value))
+    wanted -= {"and", "the", "of", "for", "mods", "mod"}
+    best = None
+    for cat in cats:
+        words = set(_norm_words(cat.get("name"))) - {"and", "the", "of", "for", "mods", "mod"}
+        if not words:
+            continue
+        overlap = len(wanted & words)
+        if not overlap:
+            continue
+        ratio = overlap / float(len(words))
+        if ratio >= 0.5 and (best is None or ratio > best[0]):
+            best = (ratio, cat.get("id"))
+    return best[1] if best else None
+
+
+def _cf_describe_hits(plan: dict, loader: str, mc_version: str) -> list[dict]:
+    try:
+        cats = _cf_categories()
+    except ApiError:
+        cats = []
+
+    filters = []
+    for intent in plan["intents"][:2]:
+        filters.append({
+            "text": " ".join(intent["keywords"][:2]),
+            "category": None,
+            "sort": 2,
+        })
+        category_id = _cf_category_match(intent, cats)
+        if category_id:
+            filters.append({"text": "", "category": category_id, "sort": 6})
+    if not filters and plan["tokens"]:
+        filters.append({"text": " ".join(plan["tokens"][:5]), "category": None, "sort": 2})
+
+    hits = []
+    seen_filters = set()
+    seen_ids = set()
+    for spec in filters:
+        signature = (spec["text"], spec["category"])
+        if signature in seen_filters or not (spec["text"] or spec["category"]):
+            continue
+        seen_filters.add(signature)
+
+        params = {
+            "gameId": CF_GAME_ID,
+            "classId": CF_CLASS_MODS,
+            "sortField": spec["sort"],
+            "sortOrder": "desc",
+            "pageSize": 15,
+            "index": 0,
+        }
+        if spec["text"]:
+            params["searchFilter"] = spec["text"]
+        if spec["category"]:
+            params["categoryId"] = spec["category"]
+        if mc_version:
+            params["gameVersion"] = mc_version
+        if loader in CF_LOADERS:
+            params["modLoaderType"] = CF_LOADERS[loader]
+
+        url = f"{CURSEFORGE}/mods/search?" + urllib.parse.urlencode(params)
+        cache_key = "cfdesc:" + url
+        data = cget(cache_key)
+        if data is None:
+            try:
+                data = http_json(url, headers=cf_headers()) or {}
+            except ApiError:
+                continue
+            cset(cache_key, data, 300)
+
+        for m in data.get("data") or []:
+            mod_id = str(m.get("id"))
+            if mod_id in seen_ids:
+                continue
+            seen_ids.add(mod_id)
+            hits.append({
+                "source": "curseforge",
+                "id": mod_id,
+                "slug": m.get("slug"),
+                "title": m.get("name"),
+                "description": m.get("summary"),
+                "icon": ((m.get("logo") or {}).get("thumbnailUrl") or ""),
+                "downloads": m.get("downloadCount") or 0,
+                "follows": 0,
+                "author": ", ".join(a.get("name", "") for a in (m.get("authors") or []))[:80],
+                "categories": [c.get("name") for c in (m.get("categories") or []) if c.get("name")],
+                "updated": m.get("dateModified"),
+            })
+    return hits
+
+
+def _describe_score(hit: dict, plan: dict) -> tuple[float, list[str]]:
+    title = set(_norm_words(hit.get("title")))
+    description = set(_norm_words(hit.get("description")))
+    categories = set()
+    for category in hit.get("categories") or []:
+        categories.update(_norm_words(category))
+
+    score = 0.0
+    why = []
+    for token in plan["tokens"]:
+        if token in title:
+            score += 3.0
+            why.append(token)
+        elif token in categories:
+            score += 1.5
+            why.append(token)
+        elif token in description:
+            score += 1.0
+        elif len(token) >= 4 and any(word.startswith(token) for word in title):
+            score += 2.0
+            why.append(token)
+
+    top_intent = plan["intents"][0] if plan["intents"] else None
+    if top_intent and any(c in categories for c in top_intent["categories"]):
+        score += 4.0
+        why.append(top_intent["label"])
+    token_set = set(plan["tokens"])
+    for intent in plan["intents"]:
+        for keyword in intent["keywords"]:
+            if keyword in token_set:
+                continue
+            if keyword in title:
+                score += 2.2
+            elif keyword in description:
+                score += 0.7
+
+    try:
+        score += 1.3 * math.log10(max(1, int(hit.get("downloads") or 0)))
+    except (TypeError, ValueError):
+        pass
+
+    updated = str(hit.get("updated") or "")[:10]
+    if len(updated) == 10:
+        try:
+            age = (time.time() - time.mktime(time.strptime(updated, "%Y-%m-%d"))) / 86400.0
+            if age < 120:
+                score += 0.7
+            elif age < 400:
+                score += 0.3
+        except (ValueError, OverflowError):
+            pass
+
+    reasons = []
+    seen = set()
+    for reason in why:
+        key = reason.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        reasons.append(reason)
+        if len(reasons) == 5:
+            break
+    return score, reasons
+
+
+def rank_describe(candidates: list[dict], plan: dict) -> list[dict]:
+    ranked = []
+    for hit in candidates:
+        score, why = _describe_score(hit, plan)
+        item = dict(hit)
+        item["score"] = round(score, 2)
+        item["why"] = why
+        ranked.append(item)
+    ranked.sort(key=lambda h: (-h["score"], -(int(h.get("downloads") or 0))))
+    return ranked[:28]
+
+
+def api_describe(q):
+    text = (q.get("q") or "").strip()[:600]
+    if not text:
+        raise ApiError(400, "Describe what you are looking for first.")
+    source = (q.get("source") or "all").lower()
+    if source not in ("all", "modrinth", "curseforge"):
+        source = "all"
+    loader = q.get("loader") or ""
+    mc_version = q.get("mc") or ""
+
+    cache_key = f"describe:{source}:{loader}:{mc_version}:{text.lower()}"
+    cached = cget(cache_key)
+    if cached is not None:
+        return cached
+
+    plan = analyze_description(text)
+    if not plan["tokens"] and not plan["intents"]:
+        raise ApiError(400, "Try a few more words, like 'sort my chests' or 'smoother fps'.")
+
+    candidates = []
+    modrinth_count = 0
+    curseforge_count = 0
+    if source in ("all", "modrinth"):
+        mr_hits = _mr_describe_hits(plan, loader, mc_version)
+        modrinth_count = len(mr_hits)
+        candidates.extend(mr_hits)
+
+    curseforge_enabled = bool((SETTINGS.get("curseforgeKey") or "").strip())
+    if source in ("all", "curseforge") and curseforge_enabled:
+        cf_hits = _cf_describe_hits(plan, loader, mc_version)
+        curseforge_count = len(cf_hits)
+        candidates.extend(cf_hits)
+
+    ranked = rank_describe(candidates, plan)
+    result = {
+        "query": text,
+        "source": source,
+        "tokens": plan["tokens"][:8],
+        "intents": [{"key": i["key"], "label": i["label"], "matched": i["matched"]}
+                    for i in plan["intents"][:5]],
+        "curseforgeEnabled": curseforge_enabled,
+        "sources": {"modrinth": modrinth_count, "curseforge": curseforge_count},
+        "hits": ranked,
+        "total": len(ranked),
+    }
+    cset(cache_key, result, 600)
+    return result
+
+
 def _map_mr_version(v: dict) -> dict:
     files = v.get("files") or []
     primary = next((f for f in files if f.get("primary")), files[0] if files else {})
@@ -1359,6 +2032,35 @@ def api_project(q):
     loader = q.get("loader") or ""
     mc_version = q.get("mc") or ""
     if source == "curseforge":
+        if not str(project_id).isdigit():
+            slug = urllib.parse.unquote(str(project_id))
+            params = {
+                "gameId": CF_GAME_ID,
+                "classId": CF_CLASS_MODS,
+                "slug": slug,
+                "pageSize": 10,
+            }
+            found = http_json(f"{CURSEFORGE}/mods/search?" + urllib.parse.urlencode(params),
+                              headers=cf_headers()) or {}
+            items = found.get("data") or []
+            if not items:
+                # Older CurseForge responses occasionally ignore `slug`; retry
+                # with the slug as a plain search filter.
+                params = {
+                    "gameId": CF_GAME_ID,
+                    "classId": CF_CLASS_MODS,
+                    "searchFilter": slug,
+                    "pageSize": 10,
+                }
+                found = http_json(f"{CURSEFORGE}/mods/search?" + urllib.parse.urlencode(params),
+                                  headers=cf_headers()) or {}
+                items = found.get("data") or []
+            match = next((m for m in items
+                          if str(m.get("slug") or "").lower() == slug.lower()),
+                         items[0] if items else None)
+            if not match:
+                raise ApiError(404, f"No CurseForge project found for '{slug}'.")
+            project_id = str(match.get("id"))
         mod = http_json(f"{CURSEFORGE}/mods/{project_id}", headers=cf_headers()) or {}
         mod = mod.get("data") or {}
         params = {"pageSize": 50}
@@ -1911,6 +2613,7 @@ ROUTES_GET = {
     "mods": api_mods,
     "icon": api_icon,
     "search": api_search,
+    "describe": api_describe,
     "project": api_project,
     "updates": api_updates,
     "tags": api_tags,

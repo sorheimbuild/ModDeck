@@ -12,6 +12,10 @@ without uploading your setup anywhere.
 - **Honest health checks:** real metadata, not filenames — duplicates, missing dependencies,
   loader/version mismatches, known-bad pairs.
 - **Store-style project pages:** descriptions, galleries, versions and one-click installs.
+- **Describe search:** don't know the mod's name? Say what it should *do* and ModDeck ranks the
+  best matches instead of forwarding a sentence to a keyword index.
+- **Mod links stay inside:** clicking a Modrinth or CurseForge mod link opens its ModDeck page;
+  every other link still opens your browser.
 - **Nothing destructive by accident:** every removal goes to a recoverable trash.
 
 > **Built by vibe coding.** ModDeck was designed and written in a conversation with
@@ -80,10 +84,31 @@ standard library.
 - Search Modrinth or CurseForge, automatically filtered to **your loader + Minecraft version**.
 - **Click any result to open its full project page**: description, screenshots/gallery, categories,
   licence, client/server side, links, downloads and every compatible build.
+- **Mod links in descriptions open in ModDeck too.** Any `modrinth.com/mod/...` or
+  `curseforge.com/minecraft/mc-mods/...` link goes to the matching project page, with a back stack
+  for mod → mod → back. Ctrl-click or middle-click still opens the real browser. Non-mod links
+  (GitHub, Discord, wikis, donation pages) always open outside the app.
 - **Description** and **Versions** tabs; install from either one.
 - Installs the file, verifies its **SHA-1**, and can pull required dependencies automatically.
 - If a Fabric mod needs `fabric-*` API modules, **Fabric API is installed automatically**.
 - If a CurseForge author disabled third-party downloads, ModDeck tells you and links to the page.
+
+### Describe
+
+A separate sidebar tab for the times you don't know the mod's name.
+
+![Describe search](docs/screenshot-describe.png)
+
+- Write what the mod should do — *"make my game smoother on a potato pc and show my fps"*,
+  *"automatically sort items into chests"*, *"a minimap with waypoints"*.
+- ModDeck extracts **intents** (performance, storage, HUD, worldgen, …) and the words you actually
+  used, fetches candidates with a few short category + keyword queries, then **re-ranks locally**
+  against the target loader/version.
+- Result cards show **why** they matched (`fps`, `storage`, `hud`, …), so the ranking is visible.
+- Modrinth works immediately. **CurseForge joins the same search as soon as an API key is added** —
+  no restart or extra toggle.
+- This is a local librarian, **not** an AI model: no downloads, no API key for Modrinth, no sentence
+  sent to a search engine. It is deliberately keyword/intent based rather than semantic.
 
 ### Updates
 
@@ -136,6 +161,10 @@ never uploads your mod list or instance paths anywhere.
 - Version ranges in `breaks` are best-effort Maven/semver parsing; weird custom version strings may
   be judged incorrectly. Warnings are deliberately conservative.
 - CurseForge requires a free API key (`console.curseforge.com`), stored locally in `settings.json`.
+  Describe-search still runs on Modrinth without one; CurseForge results appear once a key is saved.
+- Describe-search is intent-based, not a language model. It handles everyday phrasings well but
+  will not understand every metaphor — mention the job (fps, storage, minimap, shaders) if a
+  sentence comes back empty.
 - Fabric mods that depend on individual `fabric-*` modules are treated as satisfied when Fabric API
   is present.
 - Modrinth is the only source for hash-based update detection.
