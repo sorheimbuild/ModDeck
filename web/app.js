@@ -10,6 +10,11 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ));
 
+// Show ~ for the user's home folder so paths stay readable (and shareable).
+const prettyPath = (p) => String(p ?? '')
+  .replace(/^([A-Za-z]:\\Users\\[^\\]+)(?=\\|$)/i, '~')
+  .replace(/^\/home\/[^/]+(?=\/|$)/, '~');
+
 const ICON = {
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
   warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 3.2 21 19.5H3L12 3.2Z"/><path d="M12 9v4.5M12 16.8v.2"/></svg>',
@@ -306,7 +311,7 @@ function renderHeader() {
           Minecraft <b>${esc(inst.mcVersion || 'set version')}</b>
         </button>
         <span class="muted">${esc(inst.type)}</span>
-        <span class="path" title="${esc(inst.modsPath)}">${esc(inst.modsPath)}</span>
+        <span class="path" title="${esc(inst.modsPath)}">${esc(prettyPath(inst.modsPath))}</span>
       </div>
     </div>
     <div class="top-actions">
@@ -1134,7 +1139,7 @@ function renderSettings() {
           <span class="inst-dot" style="background:${i.id === (inst && inst.id) ? 'var(--accent)' : 'var(--line-2)'}"></span>
           <div class="grow">
             <div class="nm">${esc(i.name)} ${loaderChip(i.loader)}</div>
-            <div class="pt">${esc(i.path)}</div>
+            <div class="pt">${esc(prettyPath(i.path))}</div>
           </div>
           <button class="btn sm ghost" data-act="open-path" data-path="${esc(i.path)}">Open</button>
           ${i.type === 'custom' ? `<button class="btn sm ghost danger" data-act="remove-instance" data-id="${esc(i.id)}">Remove</button>` : ''}
