@@ -305,11 +305,29 @@ select.sort {
 .card-icon { width: 44px; height: 44px; border-radius: 10px; background: var(--panel-2);
              border: 1px solid var(--line-2); object-fit: cover; flex: none; }
 .card-title { font-size: 13.6px; font-weight: 600; line-height: 1.25; }
+.card-title-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .card-by { color: var(--muted); font-size: 11px; margin-top: 2px; }
 .card-desc { color: #8496ac; font-size: 12px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; min-height: 47px; }
 .card-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 4px; }
 .card-stats { color: var(--muted); font-size: 11px; display: flex; gap: 10px; align-items: center; }
 .card-foot .btn { margin-left: auto; }
+.card-foot .split-btn { margin-left: auto; }
+.card-foot .split-btn .btn { margin-left: 0; }
+
+/* split install button: main action + version picker */
+.split-btn { display: inline-flex; align-items: stretch; }
+.split-btn .btn { border-radius: 0; }
+.split-btn .btn:first-child { border-top-left-radius: 9px; border-bottom-left-radius: 9px; }
+.split-btn .btn:last-child { border-top-right-radius: 9px; border-bottom-right-radius: 9px; }
+.split-btn .btn.sm:first-child { border-top-left-radius: 7px; border-bottom-left-radius: 7px; }
+.split-btn .btn.sm:last-child { border-top-right-radius: 7px; border-bottom-right-radius: 7px; }
+.split-btn .btn + .btn { border-left: 1px solid rgba(0, 0, 0, .22); }
+.split-btn .split-arrow { padding: 8px 6px; }
+.split-btn .split-arrow.sm { padding: 5px 5px; }
+.split-btn .split-arrow svg { width: 14px; height: 14px; }
+
+.chip.installed { background: rgba(74, 222, 155, .12); color: #7de9bb; border-color: rgba(74, 222, 155, .28); }
+.chip.installed svg { width: 11px; height: 11px; }
 
 .load-more { display: flex; justify-content: center; margin-top: 18px; }
 
@@ -400,7 +418,13 @@ select.sort {
 .card[data-act="open-project"] { cursor: pointer; }
 .card[data-act="open-project"]:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: 2px; }
 
-.proj-back { margin-bottom: 10px; }
+.proj-back {
+  position: sticky; top: -22px; z-index: 30;
+  margin: -22px -30px 14px; padding: 13px 30px 11px;
+  background: linear-gradient(180deg, var(--bg) 76%, rgba(10, 14, 19, .88));
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line);
+}
 .proj-hero { display: flex; gap: 18px; align-items: flex-start; padding: 2px 0 18px; }
 .proj-icon {
   width: 88px; height: 88px; border-radius: 18px; flex: none; overflow: hidden;

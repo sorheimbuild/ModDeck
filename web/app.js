@@ -56,6 +56,7 @@ const state = {
     sources: null, curseforgeEnabled: false, loading: false, loaded: false, error: null,
   },
   projectStack: [],
+  installed: { map: {}, byVersion: {}, loadedFor: null, loading: false },
   updates: null,
   updatesLoading: false,
   updatesError: null,
@@ -84,6 +85,24 @@ async function api(path, opts = {}) {
     throw err;
   }
   return res.json();
+}
+
+const projectKey = (source, id) => `${source}:${id}`;
+
+function installedProject(source, id) {
+  return state.installed.map[projectKey(source, id)] || null;
+}
+
+function installedVersion(source, versionId) {
+  return versionId ? state.installed.byVersion[projectKey(source, versionId)] || null : null;
+}
+
+function installedChip(source, id, showVersion = false) {
+  const hit = installedProject(source, id);
+  if (!hit) return '';
+  const label = showVersion && hit.versionNumber ? `Installed · ${hit.versionNumber}` : 'Installed';
+  const suffix = hit.enabled ? '' : ' · disabled';
+  return `<span class="chip installed" title="${esc(hit.file || '')}${hit.enabled ? '' : ' (disabled)'}">${ICON.check.replace('<svg', '<svg width="11" height="11" style="vertical-align:-1px"')} ${esc(label)}${suffix}</span>`;
 }
 
 function toast(message, kind = 'ok', ms = 3600) {
@@ -361,7 +380,18 @@ function renderTabs() {
     </button>`).join('');
 }
 
+const scrollMem = new Map();
+let renderedViewKey = null;
+
+function viewKeyFor() {
+  return state.detail
+    ? `project:${state.detail.source}/${state.detail.id}`
+    : `tab:${state.tab}:${state.inst ? state.inst.id : ''}`;
+}
+
 function render() {
+  const view = $('#view');
+  if (view && renderedViewKey) scrollMem.set(renderedViewKey, view.scrollTop);
   renderSidebar();
   renderHeader();
   renderTabs();
@@ -374,6 +404,8 @@ function render() {
   else if (state.tab === 'describe') renderDescribe();
   else if (state.tab === 'updates') renderUpdates();
   else renderSettings();
+  renderedViewKey = viewKeyFor();
+  if (view) view.scrollTop = scrollMem.get(renderedViewKey) || 0;
 }
 
 /* --------------------------------------------------------------------- mods */
@@ -723,12 +755,16 @@ function paintDiscoverResults() {
 }
 
 function discoverCard(hit) {
+  const current = installedProject(hit.source, hit.id);
   return `<div class="card" data-act="open-project" data-source="${esc(hit.source)}"
       data-id="${esc(hit.id)}" data-title="${esc(hit.title)}" role="button" tabindex="0">
     <div class="card-top">
       <img class="card-icon" src="${esc(hit.icon || '')}" alt="" loading="lazy" onerror="this.style.opacity=.15">
       <div style="min-width:0">
-        <div class="card-title">${esc(hit.title)}</div>
+        <div class="card-title-row">
+          <span class="card-title">${esc(hit.title)}</span>
+          ${installedChip(hit.source, hit.id)}
+        </div>
         <div class="card-by">${esc(hit.author || 'unknown author')}</div>
       </div>
     </div>
@@ -739,8 +775,14 @@ function discoverCard(hit) {
         <span>${ICON.download.replace('<svg', '<svg width="12" height="12" style="vertical-align:-1px"')} ${fmtNum(hit.downloads)}</span>
         <span>${esc(relDate(hit.updated))}</span>
       </div>
-      <button class="btn sm primary" data-act="pick-version"
-        data-source="${esc(hit.source)}" data-id="${esc(hit.id)}" data-title="${esc(hit.title)}">Install</button>
+      <div class="split-btn">
+        <button class="btn sm primary" data-act="install-latest"
+          data-source="${esc(hit.source)}" data-id="${esc(hit.id)}" data-title="${esc(hit.title)}"
+          title="Install the newest compatible version">${current ? 'Reinstall' : 'Install'}</button>
+        <button class="btn sm primary split-arrow" data-act="pick-version"
+          data-source="${esc(hit.source)}" data-id="${esc(hit.id)}" data-title="${esc(hit.title)}"
+          title="Choose a version" aria-label="Choose a version">${ICON.chev}</button>
+      </div>
     </div>
   </div>`;
 }
@@ -907,28 +949,50 @@ async function searchDescribe() {
 
 /* ------------------------------------------------------------ version picker */
 
+async function finishInstall(res) {
+  if (res.needsManual) {
+    toast(res.message, 'warn', 8000);
+    if (res.website) window.open(res.website, '_blank');
+  } else {
+    const names = (res.installed || []).map((i) => i.file);
+    if (names.length) {
+      toast(`Installed ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` +${names.length - 3} more` : ''}`);
+    }
+    if (res.errors && res.errors.length) toast(res.errors.join('; '), 'warn', 8000);
+  }
+  closeModal();
+  await scanAfterAction();
+}
+
 async function pickVersion(source, id, title) {
+  if (!state.installed.loadedFor) await refreshInstalled();
   openModal(`<div class="modal-head"><div><h2>${esc(title)}</h2>
       <p>Loading compatible versions…</p></div><button class="modal-x" data-act="close-modal">×</button></div>
     <div class="modal-body"><div class="skeleton" style="height:120px"></div></div>`, { wide: true });
+  const ticket = modalCloser;
 
   const params = new URLSearchParams({ source, id });
   if (state.inst) { params.set('loader', state.inst.loader || ''); params.set('mc', state.inst.mcVersion || ''); }
   let project;
   try { project = await api('project?' + params.toString()); }
   catch (e) {
+    if (modalCloser !== ticket) return;
     openModal(`<div class="modal-head"><div><h2>${esc(title)}</h2><p>Could not load versions.</p></div>
       <button class="modal-x" data-act="close-modal">×</button></div>
       <div class="modal-body"><div class="note">${esc(e.message)}</div></div>
       <div class="modal-foot"><button class="btn" data-act="close-modal">Close</button></div>`);
     return;
   }
+  if (modalCloser !== ticket) return;
   const versions = project.versions || [];
-  const rows = versions.length ? versions.slice(0, 40).map((v) => `
+  const rows = versions.length ? versions.slice(0, 40).map((v) => {
+    const current = installedVersion(source, v.id);
+    return `
     <div class="version">
       <div class="v-main">
         <div class="v-name">${esc(v.versionNumber || v.name)}
           ${v.releaseType && v.releaseType !== 'release' ? `<span class="chip muted">${esc(v.releaseType)}</span>` : ''}
+          ${current ? `<span class="chip installed">${ICON.check.replace('<svg', '<svg width="11" height="11" style="vertical-align:-1px"')} Installed</span>` : ''}
         </div>
         <div class="v-meta">
           <span>${esc(fmtDate(v.published))}</span>
@@ -939,10 +1003,11 @@ async function pickVersion(source, id, title) {
             ? `<span class="muted">+${v.dependencies.filter((d) => d.type === 'required').length} required dep(s)</span>` : ''}
         </div>
       </div>
-      <button class="btn sm primary" data-act="do-install" data-source="${esc(source)}"
+      <button class="btn sm ${current ? '' : 'primary'}" data-act="do-install" data-source="${esc(source)}"
         data-project="${esc(project.id)}" data-version="${esc(v.id)}" data-name="${esc(v.versionNumber || v.name)}"
-        ${v.downloadUrl === null ? 'disabled title="Author disabled third-party downloads"' : ''}>Install</button>
-    </div>`).join('') : `<div class="empty" style="padding:26px">${ICON.box}<h3>No compatible builds</h3>
+        ${v.downloadUrl === null ? 'disabled title="Author disabled third-party downloads"' : ''}>${current ? 'Reinstall' : 'Install'}</button>
+    </div>`;
+  }).join('') : `<div class="empty" style="padding:26px">${ICON.box}<h3>No compatible builds</h3>
       <p>This project has no files for ${esc(state.inst.loader)} ${esc(state.inst.mcVersion)}. Change the target version from the header, or check the project page.</p></div>`;
 
   openModal(`<div class="modal-head">
@@ -1081,6 +1146,7 @@ function renderProject() {
 
   const p = d.data || {};
   const versions = p.versions || [];
+  const projInstalled = installedProject(p.source, p.id);
   const gallery = (p.gallery || []).filter((g) => g && g.url);
   const stats = [];
   if (p.downloads) stats.push(`${ICON.download.replace('<svg', '<svg width="13" height="13" style="vertical-align:-2px"')} ${fmtNum(p.downloads)} downloads`);
@@ -1106,11 +1172,14 @@ function renderProject() {
   const overview = `${galleryHtml}
     <div class="md">${p.body ? mdToHtml(p.body) : '<p class="muted">No description provided.</p>'}</div>`;
 
-  const versionsHtml = versions.length ? `<div class="proj-versions">${versions.map((v) => `
+  const versionsHtml = versions.length ? `<div class="proj-versions">${versions.map((v) => {
+    const current = installedVersion(p.source, v.id);
+    return `
     <div class="version">
       <div class="v-main">
         <div class="v-name">${esc(v.versionNumber || v.name || v.id)}
           ${v.releaseType && v.releaseType !== 'release' ? `<span class="chip muted">${esc(v.releaseType)}</span>` : ''}
+          ${current ? `<span class="chip installed">${ICON.check.replace('<svg', '<svg width="11" height="11" style="vertical-align:-1px"')} Installed</span>` : ''}
         </div>
         <div class="v-meta">
           <span>${esc(fmtDate(v.published))}</span>
@@ -1123,9 +1192,10 @@ function renderProject() {
       </div>
       ${v.downloadUrl === null
         ? '<button class="btn sm primary" disabled title="Author disabled third-party downloads">Unavailable</button>'
-        : `<button class="btn sm primary" data-act="do-install" data-source="${esc(p.source)}"
-             data-project="${esc(p.id)}" data-version="${esc(v.id)}" data-name="${esc(v.versionNumber || v.name)}">Install</button>`}
-    </div>`).join('')}</div>`
+        : `<button class="btn sm ${current ? '' : 'primary'}" data-act="do-install" data-source="${esc(p.source)}"
+             data-project="${esc(p.id)}" data-version="${esc(v.id)}" data-name="${esc(v.versionNumber || v.name)}">${current ? 'Reinstall' : 'Install'}</button>`}
+    </div>`;
+  }).join('')}</div>`
     : `<div class="empty" style="padding:26px">${ICON.box}<h3>No compatible builds</h3>
        <p>No files for ${esc(state.inst ? `${state.inst.loader} ${state.inst.mcVersion}` : 'this version')}.
        Change the target version from the header, or check the project page.</p></div>`;
@@ -1147,6 +1217,7 @@ function renderProject() {
       <div class="proj-headline">
         <div class="row-gap proj-chips">
           <span class="chip ${p.source === 'curseforge' ? 'forge' : 'fabric'}">${esc(p.source === 'curseforge' ? 'CurseForge' : 'Modrinth')}</span>
+          ${installedChip(p.source, p.id, true)}
           ${categories.map((c) => `<span class="chip muted">${esc(c)}</span>`).join('')}
         </div>
         <h1>${esc(p.title || d.title || 'Project')}</h1>
@@ -1154,8 +1225,14 @@ function renderProject() {
         ${p.description ? `<p class="proj-tagline">${esc(p.description)}</p>` : ''}
         <div class="proj-stats">${stats.map((s) => `<span>${s}</span>`).join('')}</div>
         <div class="row-gap proj-cta">
-          <button class="btn primary" data-act="pick-version"
-            data-source="${esc(p.source)}" data-id="${esc(p.id)}" data-title="${esc(p.title || '')}">Install</button>
+          <div class="split-btn">
+            <button class="btn primary" data-act="install-latest"
+              data-source="${esc(p.source)}" data-id="${esc(p.id)}" data-title="${esc(p.title || '')}"
+              title="Install the newest compatible version">${projInstalled ? 'Reinstall' : 'Install'}</button>
+            <button class="btn primary split-arrow" data-act="pick-version"
+              data-source="${esc(p.source)}" data-id="${esc(p.id)}" data-title="${esc(p.title || '')}"
+              title="Choose a version" aria-label="Choose a version">${ICON.chev}</button>
+          </div>
           <button class="btn" data-act="proj-tab" data-tab="versions">Versions${versions.length ? ` (${versions.length})` : ''}</button>
           ${website ? `<a class="btn ghost" href="${website}" target="_blank" rel="noreferrer">Open project page</a>` : ''}
         </div>
@@ -1297,7 +1374,9 @@ async function doUpdate(projectId, versionId, file) {
     if (res.needsManual) { toast(res.message, 'warn', 7000); return; }
     toast(`Updated ${res.installed.map((i) => i.file).join(', ')}`);
     state.updates = null;
+    state.installed.loadedFor = null;
     await refreshScan();
+    await refreshInstalled();
     await checkUpdates();
   } catch (e) {
     toast(e.message, 'error', 7000);
@@ -1321,7 +1400,9 @@ async function updateAll() {
   }
   toast(`Updated ${ok} mod${ok === 1 ? '' : 's'}${fail ? `, ${fail} failed` : ''}${skipped ? ` · skipped ${skipped} duplicate cop${skipped === 1 ? 'y' : 'ies'}` : ''}`,
     fail ? 'warn' : 'ok', 6000);
+  state.installed.loadedFor = null;
   await refreshScan();
+  await refreshInstalled();
   await checkUpdates();
 }
 
@@ -1462,6 +1543,31 @@ function paintTrash() {
 
 /* -------------------------------------------------------------- interactions */
 
+async function refreshInstalled(force = false) {
+  if (!state.inst) return;
+  const iid = state.inst.id;
+  if (!force && state.installed.loadedFor === iid) return;
+  state.installed.loading = true;
+  try {
+    const res = await api('installed?instance=' + encodeURIComponent(iid));
+    if (!state.inst || state.inst.id !== iid) return;
+    const map = {};
+    const byVersion = {};
+    (res.projects || []).forEach((p) => {
+      if (!p.source || !p.id) return;
+      const key = projectKey(p.source, p.id);
+      if (!map[key] || (p.enabled && !map[key].enabled)) map[key] = p;
+      if (p.versionId) byVersion[projectKey(p.source, p.versionId)] = p;
+    });
+    state.installed = { map, byVersion, loadedFor: iid, loading: false };
+  } catch {
+    if (state.inst && state.inst.id === iid) {
+      state.installed = { map: {}, byVersion: {}, loadedFor: iid, loading: false };
+    }
+  }
+  if (state.inst && state.inst.id === iid) render();
+}
+
 async function refreshScan() {
   if (!state.inst) return;
   state.loadingScan = true;
@@ -1493,15 +1599,19 @@ async function selectInstance(id) {
   state.discover.loaded = false;
   state.describe.loaded = false;
   state.tab = state.tab === 'settings' ? 'settings' : state.tab;
+  state.installed = { map: {}, byVersion: {}, loadedFor: null, loading: false };
   render();
   await refreshScan();
+  await refreshInstalled(true);
   if (state.tab === 'describe' && state.describe.q.trim()) await searchDescribe();
   api('settings', { method: 'POST', body: { lastInstance: id } }).catch(() => {});
   localStorage.setItem('moddeck.inst', id);
 }
 
 async function scanAfterAction() {
+  state.installed.loadedFor = null;
   await refreshScan();
+  await refreshInstalled();
   state.updates = null;
   if (state.tab === 'updates') await checkUpdates();
 }
@@ -1545,6 +1655,8 @@ async function doModAction(action, files) {
     const done = res.results.filter((r) => r.ok);
     if (done.length) toast(`${action === 'delete' ? 'Moved to trash' : action === 'enable' ? 'Enabled' : 'Disabled'} ${done.length} file${done.length === 1 ? '' : 's'}`);
     await refreshScan();
+    state.installed.loadedFor = null;
+    if (action === 'delete') await refreshInstalled();
     if (action === 'disable' && done.length) {
       maybeOfferDelete(done.map((r) => r.file).filter(Boolean));
     }
@@ -1558,15 +1670,19 @@ async function doModAction(action, files) {
 /* ------------------------------------------------------------------ shortcuts */
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeModal();
+  if (e.key === 'Escape') {
+    if (modalCloser) closeModal();
+    else if (state.detail) closeProject();
+  }
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
   if (e.key === '/' && !typing) {
     const box = $('#mod-search') || $('#disc-search') || $('#desc-input');
     if (box) { e.preventDefault(); box.focus(); }
   }
   if (!typing && (e.key === 'Enter' || e.key === ' ')) {
-    const card = document.activeElement && document.activeElement.closest
-      ? document.activeElement.closest('.card[data-act="open-project"]')
+    const active = document.activeElement;
+    const card = active && active.matches && active.matches('.card[data-act="open-project"]')
+      ? active
       : null;
     if (card) { e.preventDefault(); card.click(); }
   }
@@ -1588,7 +1704,13 @@ document.addEventListener('click', async (e) => {
   if (!el) return;
   const act = el.dataset.act;
 
-  if (act === 'close-modal') return closeModal();
+  if (act === 'close-modal') {
+    // The backdrop carries data-act="close-modal". Clicks on the dialog itself
+    // (including checkboxes and labels inside it) also resolve to the backdrop,
+    // so only an actual backdrop click should close the modal.
+    if (el.classList.contains('modal-backdrop') && e.target !== el) return;
+    return closeModal();
+  }
 
   switch (act) {
     case 'select-inst': return selectInstance(el.dataset.id);
@@ -1620,7 +1742,8 @@ document.addEventListener('click', async (e) => {
       state.projectStack = [];
       state.tab = tab;
       try { history.replaceState(null, '', '#' + tab); } catch { /* ignore */ }
-      if (tab === 'discover') { render(); }
+      if (tab === 'discover') { render(); refreshInstalled(); }
+      else if (tab === 'describe') { render(); refreshInstalled(); }
       else if (tab === 'updates') { render(); if (!state.updates && !state.updatesLoading) checkUpdates(); }
       else render();
       return;
@@ -1726,6 +1849,24 @@ document.addEventListener('click', async (e) => {
     }
     case 'pick-version': {
       return pickVersion(el.dataset.source, el.dataset.id, el.dataset.title);
+    }
+    case 'install-latest': {
+      if (!state.inst) return toast('Select an instance first', 'warn');
+      const label = el.innerHTML;
+      el.disabled = true;
+      el.innerHTML = '<span class="spinner"></span>';
+      try {
+        const res = await api('install', { method: 'POST', body: {
+          instance: state.inst.id, source: el.dataset.source, projectId: el.dataset.id,
+          installDeps: true,
+        } });
+        await finishInstall(res);
+      } catch (err) {
+        toast(err.message, 'error', 8000);
+        el.disabled = false;
+        el.innerHTML = label;
+      }
+      return;
     }
     case 'do-install': {
       const deps = $('#install-deps') ? $('#install-deps').checked : true;
@@ -1963,6 +2104,10 @@ async function versionModal() {
 /* ---------------------------------------------------------------------- boot */
 
 window.addEventListener('hashchange', handleHash);
+
+$('#view').addEventListener('scroll', () => {
+  if (renderedViewKey) scrollMem.set(renderedViewKey, $('#view').scrollTop);
+}, { passive: true });
 
 (async function boot() {
   try {

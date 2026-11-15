@@ -84,11 +84,19 @@ standard library.
 - Search Modrinth or CurseForge, automatically filtered to **your loader + Minecraft version**.
 - **Click any result to open its full project page**: description, screenshots/gallery, categories,
   licence, client/server side, links, downloads and every compatible build.
+- **Install means install now.** The main button downloads the newest stable build that fits your
+  loader and Minecraft version; the small arrow attached to it opens the full version list.
+- **Knows what you already have.** Results and project pages show an **Installed** badge (and mark
+  the exact build in the version list), using Modrinth hashes plus ModDeck's install records — so a
+  mod you added months ago is still recognised. Disabled jars say so.
 - **Mod links in descriptions open in ModDeck too.** Any `modrinth.com/mod/...` or
   `curseforge.com/minecraft/mc-mods/...` link goes to the matching project page, with a back stack
   for mod → mod → back. Ctrl-click or middle-click still opens the real browser. Non-mod links
   (GitHub, Discord, wikis, donation pages) always open outside the app.
 - **Description** and **Versions** tabs; install from either one.
+- **A persistent back bar** stays pinned while you read a long description, and **Esc** returns you
+  to the previous page. ModDeck also remembers your scroll position, so going back to search results
+  drops you exactly where you were.
 - Installs the file, verifies its **SHA-1**, and can pull required dependencies automatically.
 - If a Fabric mod needs `fabric-*` API modules, **Fabric API is installed automatically**.
 - If a CurseForge author disabled third-party downloads, ModDeck tells you and links to the page.
@@ -167,7 +175,9 @@ never uploads your mod list or instance paths anywhere.
   sentence comes back empty.
 - Fabric mods that depend on individual `fabric-*` modules are treated as satisfied when Fabric API
   is present.
-- Modrinth is the only source for hash-based update detection.
+- Modrinth is the only source for hash-based update detection. Installed detection also uses
+  ModDeck's own install records, so CurseForge jars downloaded by hand outside ModDeck cannot be
+  recognised.
 - Project descriptions are rendered from Markdown/HTML with a small safe renderer. Remote images
   load from Modrinth/CurseForge CDNs; nothing is executed.
 

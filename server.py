@@ -33,7 +33,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "ModDeck"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 WEB_DIR = RESOURCE_DIR / "web"
@@ -126,6 +126,12 @@ def cget(key: str):
 def cset(key: str, value, ttl: float = 600) -> None:
     with _CACHE_LOCK:
         _CACHE[key] = (value, time.time() + ttl)
+
+
+def cache_clear(prefix: str) -> None:
+    with _CACHE_LOCK:
+        for key in [k for k in _CACHE if k.startswith(prefix)]:
+            _CACHE.pop(key, None)
 
 
 def save_settings() -> None:
@@ -1124,6 +1130,29 @@ def cf_headers() -> dict:
     return {"x-api-key": key}
 
 
+def cf_files(project_id: str, mc_version: str | None, loader: str | None) -> list[dict]:
+    """Files for a CurseForge project, narrowed to the instance's version/loader."""
+    params = {"pageSize": 50}
+    if mc_version:
+        params["gameVersion"] = mc_version
+    if loader in CF_LOADERS:
+        params["modLoaderType"] = CF_LOADERS[loader]
+    data = http_json(f"{CURSEFORGE}/mods/{project_id}/files?" + urllib.parse.urlencode(params),
+                     headers=cf_headers()) or {}
+    return data.get("data") or []
+
+
+def cf_latest_file(project_id: str, mc_version: str | None, loader: str | None) -> dict:
+    """Newest stable CurseForge file, falling back to the newest file of any type."""
+    files = cf_files(project_id, mc_version, loader)
+    if not files:
+        raise ApiError(404, "No CurseForge file supports this loader and Minecraft version.")
+    releases = [f for f in files if f.get("releaseType") == 1]
+    picks = releases or files
+    picks.sort(key=lambda f: str(f.get("fileDate") or ""), reverse=True)
+    return picks[0]
+
+
 # -------------------------------------------------------------------- endpoints
 
 
@@ -1150,6 +1179,83 @@ def api_mods(q):
     return scan_instance(inst)
 
 
+def api_installed(q):
+    """Map of the instance's jars to their Modrinth/CurseForge projects.
+
+    Used by search and project pages so an already-installed mod is obvious
+    before the user presses Install again.
+    """
+    inst = get_instance(q.get("instance", ""))
+    if not inst:
+        raise ApiError(404, "Unknown instance")
+    mods_dir = Path(inst["modsPath"])
+    disabled_dir = mods_dir.parent / "mods.disabled"
+
+    entries: list[tuple[Path, bool]] = []
+    for folder, enabled in ((mods_dir, True), (disabled_dir, False)):
+        if not folder.is_dir():
+            continue
+        for p in sorted(folder.iterdir(), key=lambda x: x.name.lower()):
+            low = p.name.lower()
+            if p.is_file() and (low.endswith(".jar") or low.endswith(".jar.disabled")):
+                entries.append((p, enabled))
+    if not entries:
+        return {"projects": []}
+
+    digests: dict[Path, str] = {}
+    hash_to_entry: dict[str, tuple[Path, bool]] = {}
+    for p, enabled in entries:
+        try:
+            digest = sha1_file(p)
+        except Exception:
+            continue
+        digests[p] = digest
+        hash_to_entry.setdefault(digest, (p, enabled))
+
+    resolved: dict[str, dict] = {}
+    if hash_to_entry:
+        signature = ",".join(sorted(hash_to_entry))
+        cache_key = "installed:" + inst["id"] + ":" + hashlib.sha1(signature.encode()).hexdigest()[:16]
+        cached = cget(cache_key)
+        if cached is not None:
+            resolved = cached
+        else:
+            hash_list = list(hash_to_entry)
+            for start in range(0, len(hash_list), 100):
+                chunk = hash_list[start:start + 100]
+                try:
+                    data = http_json(f"{MODRINTH}/version_files", "POST",
+                                     {"hashes": chunk, "algorithm": "sha1"}) or {}
+                except ApiError as e:
+                    log(f"installed lookup failed: {e.message}")
+                    data = {}
+                resolved.update(data)
+            cset(cache_key, resolved, ttl=120)
+
+    projects: dict[str, dict] = {}
+    for p, enabled in entries:
+        digest = digests.get(p)
+        version = resolved.get(digest) if digest else None
+        record = (INSTALLED.get("files") or {}).get(f"{inst['id']}/{p.name}") or {}
+        source = "modrinth" if version else (record.get("source") or "")
+        project_id = str(version.get("project_id")) if version else str(record.get("projectId") or "")
+        if not source or not project_id:
+            continue
+        key = f"{source}:{project_id}"
+        candidate = {
+            "source": source,
+            "id": project_id,
+            "versionId": str(version.get("id")) if version else (str(record["versionId"]) if record.get("versionId") else None),
+            "versionNumber": version.get("version_number") if version else record.get("versionNumber"),
+            "file": p.name,
+            "enabled": bool(enabled),
+        }
+        existing = projects.get(key)
+        if not existing or (candidate["enabled"] and not existing["enabled"]):
+            projects[key] = candidate
+    return {"projects": sorted(projects.values(), key=lambda x: (x["source"], x["id"]))}
+
+
 def _safe_child(folder: Path, filename: str) -> Path:
     name = Path(filename).name
     target = folder / name
@@ -1166,6 +1272,7 @@ def api_mods_action(payload):
     files = payload.get("files") or []
     if not isinstance(files, list) or not files:
         raise ApiError(400, "No files given")
+    cache_clear("installed:")
 
     mods_dir = Path(inst["modsPath"])
     disabled_dir = mods_dir.parent / "mods.disabled"
@@ -2203,6 +2310,7 @@ def _record_install(inst: dict, filename: str, sha1: str | None, source: str, pr
         "installedAt": time.time(),
     }
     save_installed()
+    cache_clear("installed:")
 
 
 def install_modrinth(inst: dict, project_id: str, version_id: str | None, install_deps: bool,
@@ -2263,8 +2371,13 @@ def api_install(payload):
     install_deps = bool(payload.get("installDeps", True))
 
     if source == "curseforge":
-        file_data = http_json(f"{CURSEFORGE}/mods/{project_id}/files/{version_id}", headers=cf_headers()) or {}
-        file_data = file_data.get("data") or {}
+        if version_id:
+            file_data = http_json(f"{CURSEFORGE}/mods/{project_id}/files/{version_id}", headers=cf_headers()) or {}
+            file_data = file_data.get("data") or {}
+        else:
+            # No version picked: install the newest stable file that matches the instance.
+            file_data = cf_latest_file(project_id, inst.get("mcVersion"), inst.get("loader"))
+            version_id = str(file_data.get("id") or "")
         url = file_data.get("downloadUrl")
         if not url:
             mod = http_json(f"{CURSEFORGE}/mods/{project_id}", headers=cf_headers()) or {}
@@ -2610,6 +2723,7 @@ def api_trash_restore(payload):
 ROUTES_GET = {
     "state": api_state,
     "mods": api_mods,
+    "installed": api_installed,
     "icon": api_icon,
     "search": api_search,
     "describe": api_describe,
